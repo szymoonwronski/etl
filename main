@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+SCRIPT_PATH="$(readlink -f "$0")"
+BIN_DIR="$(dirname "$SCRIPT_PATH")"
+BASE_DIR="$(dirname "$BIN_DIR")"
+
+RAW_DIR="$BASE_DIR/data/raw"
+PROC_DIR="$BASE_DIR/data/processed"
+LOG_DIR="$BASE_DIR/logs"
+
+for dir in "$RAW_DIR" "$PROC_DIR" "$LOG_DIR"; do
+    if [ ! -z "$dir" ]; then
+        mkdir -p "$dir"
+    fi
+done
+
+LOG_FILE="$LOG_DIR/etl_$(date +%Y%m).log"
+FINAL_REPORT="$PROC_DIR/summary_report.txt"
+
+log() {
+    local MSG="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$MSG"
+
+    if [ -d "$LOG_DIR" ] && [ -w "$LOG_DIR" ]; then
+        echo "$MSG" >> "$LOG_FILE"
+    fi
+}
+
+log "Rozpoczęto proces ETL w lokalizacji: $BASE_DIR"
+
+URL="https://api.open-meteo.com/v1/forecast?latitude=52.23&longitude=21.01&hourly=temperature_2m&timezone=Europe%2FWarsaw"
+
+FILE_ID=$(date +%Y-%m-%d_%H%M)
+RAW_FILE="$RAW_DIR/weather_$FILE_ID.json"
+
+log "Pobieranie danych..."
+if curl -s -f "$URL" -o "$RAW_FILE"; then
+    log "Ekstrakcja OK: $RAW_FILE"
+else
+    log "BŁĄD: Pobieranie nie powiodło się."
+    exit 1
+fi
+
+log "Przetwarzanie (Transform)..."
+INTERMEDIATE_CSV="$PROC_DIR/daily_data_$FILE_ID.csv"
+
+if command -v jq >/dev/null 2>&1; then
+    jq -r '[.hourly.time, .hourly.temperature_2m] | transpose[] | @csv' "$RAW_FILE" > "$INTERMEDIATE_CSV"
+else
+    log "BŁĄD: Narzędzie 'jq' nie jest zainstalowane!"
+    exit 1
+fi
+
+log "Agregacja (Load)..."
+STATS=$(awk -F',' '{ sum += $2; n++ } END { if (n > 0) printf "%.2f", sum / n; else print "0" }' "$INTERMEDIATE_CSV")
+
+{
+    echo "--- RAPORT $(date +'%Y-%m-%d %H:%M') ---"
+    echo "Średnia temperatura (24h): $STATS°C"
+    echo "Plik źródłowy: weather_$FILE_ID.json"
+} >> "$FINAL_REPORT"
+
+log "Proces zakończony sukcesem. Średnia: $STATS°C"
